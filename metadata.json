@@ -1,0 +1,6 @@
+{
+  "name": "BSI UMKM Center",
+  "description": "Empowering MSMEs Through Digital Innovation — Ekosistem digital terintegrasi untuk marketplace UMKM, verifikasi Blockchain B-CHAIN, asisten AI B-AI & B-Smart, manajemen keuangan B-Finance, serta edukasi B-Edu.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

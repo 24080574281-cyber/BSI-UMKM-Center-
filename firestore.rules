@@ -1,0 +1,336 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == '24080574281@mhs.unesa.ac.id'
+      );
+    }
+
+    function isStoreOwner(storeId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/umkmStores/$(storeId)) &&
+        get(/databases/$(database)/documents/umkmStores/$(storeId)).data.ownerUid == request.auth.uid;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'role']) &&
+        data.uid is string && data.uid.size() <= 128 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.role in ['customer', 'umkm', 'admin'] &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 400)) &&
+        (!('city' in data) || (data.city is string && data.city.size() <= 100)) &&
+        (!('managedStoreId' in data) || data.managedStoreId == null || (data.managedStoreId is string && data.managedStoreId.size() <= 128)) &&
+        (!('points' in data) || data.points is number) &&
+        (!('streakCount' in data) || data.streakCount is number) &&
+        (!('lastCheckInDate' in data) || (data.lastCheckInDate is string && data.lastCheckInDate.size() <= 32)) &&
+        (!('eggTickets' in data) || data.eggTickets is number);
+    }
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isAdmin();
+      allow create, update, delete: if isValidId(adminId) && isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        (incoming().role in ['customer', 'umkm'] || isAdmin());
+      allow update: if isValidId(userId) && isValidUser(incoming()) && (
+        isAdmin() || (
+          isOwner(userId) &&
+          incoming().uid == existing().uid &&
+          (incoming().role in ['customer', 'umkm'] || incoming().role == existing().role) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phone', 'address', 'city', 'role', 'managedStoreId', 'points', 'streakCount', 'lastCheckInDate', 'eggTickets', 'updatedAt'])
+        )
+      );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /umkmStores/{storeId} {
+      allow get: if isValidId(storeId);
+      allow list: if true;
+      allow create: if isValidId(storeId) && isSignedIn() &&
+        incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 140 &&
+        incoming().category is string && incoming().category.size() <= 80 &&
+        (isAdmin() || incoming().ownerUid == request.auth.uid || incoming().ownerUid == null);
+      allow update: if isValidId(storeId) && isSignedIn() && (
+        isAdmin() ||
+        existing().ownerUid == request.auth.uid ||
+        (existing().ownerUid == null && incoming().ownerUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['ownerUid', 'ownerName', 'updatedAt'])) ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['ratingAvg', 'reviewCount'])
+      );
+      allow delete: if isValidId(storeId) && isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId);
+      allow list: if true;
+      allow create: if isValidId(categoryId) && isSignedIn() &&
+        incoming().name is string && incoming().name.size() <= 80 &&
+        (isAdmin() || !exists(/databases/$(database)/documents/categories/$(categoryId)));
+      allow update, delete: if isValidId(categoryId) && isAdmin();
+    }
+
+    match /products/{productId} {
+      allow get: if isValidId(productId);
+      allow list: if true;
+      allow create: if isValidId(productId) && isSignedIn() &&
+        incoming().storeId is string && incoming().storeId.size() <= 128 &&
+        incoming().name is string && incoming().name.size() >= 1 && incoming().name.size() <= 160 &&
+        (isAdmin() || isStoreOwner(incoming().storeId) || incoming().storeOwnerUid == null);
+      allow update: if isValidId(productId) && isSignedIn() && (
+        isAdmin() ||
+        isStoreOwner(existing().storeId) ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['stock', 'soldCount', 'updatedAt']) ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['ratingAvg', 'reviewCount', 'updatedAt'])
+      );
+      allow delete: if isValidId(productId) && (isAdmin() || isStoreOwner(existing().storeId));
+    }
+
+    match /inventoryMovements/{movementId} {
+      allow get: if isValidId(movementId) && isSignedIn() && (isAdmin() || isStoreOwner(existing().storeId));
+      allow list: if isSignedIn() && (isAdmin() || resource.data.actorUid == request.auth.uid || isStoreOwner(resource.data.storeId));
+      allow create: if isValidId(movementId) && isSignedIn() &&
+        incoming().storeId is string && incoming().storeId.size() <= 128 &&
+        incoming().productId is string && incoming().productId.size() <= 128 &&
+        incoming().actorUid == request.auth.uid;
+      allow update, delete: if isValidId(movementId) && isAdmin();
+    }
+
+    match /favorites/{favoriteId} {
+      allow get: if isValidId(favoriteId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(favoriteId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow delete: if isValidId(favoriteId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId);
+      allow list: if true;
+      allow create: if isValidId(reviewId) && isSignedIn() &&
+        incoming().userId == request.auth.uid &&
+        incoming().rating is number && incoming().rating >= 1 && incoming().rating <= 5 &&
+        incoming().comment is string && incoming().comment.size() <= 1000;
+      allow update, delete: if isValidId(reviewId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+    }
+
+    match /carts/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create, update: if isValidId(userId) && isOwner(userId) && incoming().userId == request.auth.uid;
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    match /orders/{orderId} {
+      allow get: if isValidId(orderId) && isSignedIn() && (
+        existing().customerUid == request.auth.uid ||
+        isStoreOwner(existing().storeId) ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.customerUid == request.auth.uid ||
+        resource.data.storeOwnerUid == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isValidId(orderId) && isSignedIn() && incoming().customerUid == request.auth.uid;
+      allow update: if isValidId(orderId) && isSignedIn() && (
+        isAdmin() ||
+        isStoreOwner(existing().storeId) ||
+        (existing().customerUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+      );
+      allow delete: if isValidId(orderId) && isAdmin();
+    }
+
+    match /productVerifications/{verificationId} {
+      allow get: if isValidId(verificationId);
+      allow list: if true;
+      allow create: if isValidId(verificationId) && isSignedIn() && (
+        isAdmin() || isStoreOwner(incoming().storeId) || incoming().submittedByUid == request.auth.uid
+      );
+      allow update: if isValidId(verificationId) && isSignedIn() && (
+        isAdmin() || isStoreOwner(existing().storeId)
+      );
+      allow delete: if isValidId(verificationId) && isAdmin();
+    }
+
+    match /verificationHistory/{historyId} {
+      allow get: if isValidId(historyId);
+      allow list: if true;
+      allow create: if isValidId(historyId) && isSignedIn() && incoming().actorUid == request.auth.uid;
+      allow update, delete: if isValidId(historyId) && isAdmin();
+    }
+
+    match /aiConversations/{convId} {
+      allow get: if isValidId(convId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(convId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow update: if isValidId(convId) && isSignedIn() && existing().userId == request.auth.uid;
+      allow delete: if isValidId(convId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /marketingContents/{contentId} {
+      allow get: if isValidId(contentId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isStoreOwner(existing().storeId) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin());
+      allow create: if isValidId(contentId) && isSignedIn() && incoming().ownerUid == request.auth.uid;
+      allow update: if isValidId(contentId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+      allow delete: if isValidId(contentId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+
+    match /financialTransactions/{txId} {
+      allow get: if isValidId(txId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isStoreOwner(existing().storeId) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerUid == request.auth.uid || isAdmin());
+      allow create: if isValidId(txId) && isSignedIn() && (
+        incoming().ownerUid == request.auth.uid ||
+        incoming().source == 'B-Market' ||
+        isAdmin()
+      );
+      allow update, delete: if isValidId(txId) && isSignedIn() && (existing().ownerUid == request.auth.uid || isAdmin());
+    }
+
+    match /educationalGames/{gameId} {
+      allow get: if isValidId(gameId);
+      allow list: if true;
+      allow create: if isValidId(gameId) && isSignedIn() && isAdmin();
+      allow update, delete: if isValidId(gameId) && isAdmin();
+    }
+
+    match /userPoints/{pointId} {
+      allow get: if isValidId(pointId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(pointId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow update, delete: if isValidId(pointId) && isAdmin();
+    }
+
+    match /vouchers/{voucherId} {
+      allow get: if isValidId(voucherId);
+      allow list: if true;
+      allow create, delete: if isValidId(voucherId) && isAdmin();
+      allow update: if isValidId(voucherId) && isSignedIn() && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['quota'])
+      );
+    }
+
+    match /voucherRedemptions/{redemptionId} {
+      allow get: if isValidId(redemptionId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(redemptionId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow update, delete: if isValidId(redemptionId) && (isAdmin() || (isSignedIn() && existing().userId == request.auth.uid));
+    }
+
+    match /trainingPrograms/{programId} {
+      allow get: if isValidId(programId);
+      allow list: if true;
+      allow create, delete: if isValidId(programId) && isAdmin();
+      allow update: if isValidId(programId) && isSignedIn() && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['registeredCount'])
+      );
+    }
+
+    match /trainingRegistrations/{regId} {
+      allow get: if isValidId(regId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(regId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow update: if isValidId(regId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow delete: if isValidId(regId) && isAdmin();
+    }
+
+    match /mentors/{mentorId} {
+      allow get: if isValidId(mentorId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(mentorId) && isAdmin();
+    }
+
+    match /mentoringSessions/{sessionId} {
+      allow get: if isValidId(sessionId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(sessionId) && isSignedIn() && incoming().userId == request.auth.uid;
+      allow update: if isValidId(sessionId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow delete: if isValidId(sessionId) && isAdmin();
+    }
+
+    match /learningMaterials/{materialId} {
+      allow get: if isValidId(materialId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(materialId) && isAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isValidId(notifId) && isSignedIn();
+      allow update: if isValidId(notifId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow delete: if isValidId(notifId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+    }
+
+    match /systemSettings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(settingId) && isAdmin();
+    }
+
+    match /auditLogs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(logId) && isSignedIn() && incoming().actorUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /storeChats/{chatId} {
+      allow get: if isValidId(chatId) && isSignedIn() && (
+        existing().customerUid == request.auth.uid ||
+        isStoreOwner(existing().storeId) ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.customerUid == request.auth.uid ||
+        isStoreOwner(resource.data.storeId) ||
+        isAdmin()
+      );
+      allow create: if isValidId(chatId) && isSignedIn() &&
+        incoming().keys().hasAll(['storeId', 'customerUid', 'senderRole', 'text', 'createdAt']) &&
+        incoming().storeId is string && incoming().storeId.size() <= 128 &&
+        incoming().customerUid is string && incoming().customerUid.size() <= 128 &&
+        incoming().senderRole in ['customer', 'umkm'] &&
+        incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 1000 &&
+        incoming().createdAt is string && incoming().createdAt.size() <= 64 &&
+        (
+          (incoming().senderRole == 'customer' && incoming().customerUid == request.auth.uid) ||
+          (incoming().senderRole == 'umkm' && isStoreOwner(incoming().storeId)) ||
+          isAdmin()
+        );
+      allow update, delete: if isValidId(chatId) && isAdmin();
+    }
+  }
+}
